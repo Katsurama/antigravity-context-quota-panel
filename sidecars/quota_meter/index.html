@@ -140,6 +140,7 @@
       background: var(--cq-subcard);
     }
     .icon-btn.is-spinning svg { animation: spin 0.7s linear infinite; }
+    .icon-btn svg { transform-origin: center; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
     /* 唯一 2 标签导航 */
@@ -763,20 +764,6 @@
       font-size: 10.5px;
     }
 
-    .footer-btn {
-      display: block;
-      width: 100%;
-      background: transparent;
-      border: none;
-      text-align: center;
-      font-size: 9.5px;
-      font-family: inherit;
-      color: var(--cq-muted);
-      padding: 4px 0;
-      cursor: pointer;
-    }
-    .footer-btn:hover { color: var(--cq-fg-2); }
-
     .toast {
       position: fixed;
       left: 50%;
@@ -1026,10 +1013,6 @@
       <div id="model-rank-list"></div>
     </div>
   </div>
-
-  <button class="footer-btn tabular" id="btn-interval" type="button" title="点击切换自动刷新频率">
-    刷新: 5秒 · 点击切换频率
-  </button>
   </div>
   <div class="toast" id="toast"></div>
 
@@ -1041,12 +1024,7 @@
       yellow: { dark: ['#1e202b', '#713f12', '#a16207', '#eab308', '#fde047'], light: ['#e9ecf4', '#fef9c3', '#fde047', '#ca8a04', '#854d0e'] },
     };
 
-    const REFRESH_CADENCES = [
-      { ms: 5000, label: '5秒' },
-      { ms: 15000, label: '15秒' },
-      { ms: 30000, label: '30秒' },
-      { ms: 0, label: '手动' },
-    ];
+    const AUTO_REFRESH_MS = 30_000;
 
     let toastTimer = null;
     function showToast(msg) {
@@ -1546,39 +1524,17 @@
           rankCard.style.display = 'none';
         }
       }
-
-      updateFooterText();
     }
 
-    let cadenceIdx = Number(localStorage.getItem('cq_cadence_idx') || 0);
-    if (!Number.isInteger(cadenceIdx) || cadenceIdx < 0 || cadenceIdx >= REFRESH_CADENCES.length) {
-      cadenceIdx = 0;
-    }
     let pollTimer = null;
+    let isRefreshing = false;
 
-    function updateFooterText() {
-      const cur = REFRESH_CADENCES[cadenceIdx];
-      const timeStr = lastData ? new Date().toTimeString().slice(0, 8) : '--:--:--';
-      document.getElementById('btn-interval').textContent =
-        `刷新: ${cur.label} · 更新于 ${timeStr} (点击切换)`;
-    }
-
-    function applyPollTimer() {
+    function resetPollTimer() {
       clearInterval(pollTimer);
-      pollTimer = null;
-      const ms = REFRESH_CADENCES[cadenceIdx].ms;
-      if (ms > 0) {
-        pollTimer = setInterval(() => refresh(false), ms);
-      }
-      updateFooterText();
+      pollTimer = setInterval(() => {
+        if (!document.hidden) refresh(false);
+      }, AUTO_REFRESH_MS);
     }
-
-    document.getElementById('btn-interval').onclick = () => {
-      cadenceIdx = (cadenceIdx + 1) % REFRESH_CADENCES.length;
-      localStorage.setItem('cq_cadence_idx', String(cadenceIdx));
-      applyPollTimer();
-      showToast(`刷新频率已切为：${REFRESH_CADENCES[cadenceIdx].label}`);
-    };
 
     function fallbackExecCopy(text) {
       const ta = document.createElement('textarea');
@@ -1684,24 +1640,45 @@
     };
 
     async function refresh(force = false) {
+      if (isRefreshing) return;
+      isRefreshing = true;
       const errBox = document.getElementById('err-box');
       const refreshBtn = document.getElementById('btn-refresh');
-      if (force) refreshBtn.classList.add('is-spinning');
+      const startedAt = Date.now();
+      if (force) {
+        refreshBtn.disabled = true;
+        refreshBtn.classList.add('is-spinning');
+      }
       try {
         const qs = new URLSearchParams();
         if (selectedConvId) qs.set('conversationId', selectedConvId);
-        if (force) qs.set('force', '1');
+        if (force) {
+          qs.set('force', '1');
+          qs.set('_t', String(startedAt));
+        }
         const url = qs.toString() ? `/api/telemetry?${qs.toString()}` : '/api/telemetry';
-        const res = await fetch(url);
+        const res = await apiFetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || '读取失败');
         errBox.style.display = 'none';
         render(data);
+        if (force) {
+          resetPollTimer();
+          const elapsed = Date.now() - startedAt;
+          if (elapsed < 400) {
+            await new Promise((r) => setTimeout(r, 400 - elapsed));
+          }
+          showToast('已刷新数据');
+        }
       } catch (e) {
         errBox.textContent = `读取失败: ${e.message}`;
         errBox.style.display = 'block';
+        if (force) showToast('刷新失败');
       } finally {
-        if (force) refreshBtn.classList.remove('is-spinning');
+        isRefreshing = false;
+        refreshBtn.disabled = false;
+        refreshBtn.classList.remove('is-spinning');
       }
     }
 
@@ -1714,7 +1691,7 @@
       }
     });
 
-    applyPollTimer();
+    resetPollTimer();
     refresh(false);
   </script>
 </body>

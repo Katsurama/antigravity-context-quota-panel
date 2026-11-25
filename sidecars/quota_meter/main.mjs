@@ -469,20 +469,27 @@ app.api('/api/telemetry', async (data) => {
     const history = await aggregateHistory(summaries, targetId, currentTraj, modelConfigs, forceHistory);
     const conversations = buildConversationsList(summaries, defaultConv || targetId);
 
-    return {
-      ok: true,
-      updatedAt: new Date().toISOString(),
-      plan: {
-        name: planInfo.planName || 'Free',
-        monthlyPriceUsd: /ultra/i.test(planInfo.planName || '') ? 249.99 : /pro/i.test(planInfo.planName || '') ? 19.99 : 0,
-        promptCredits: userStatus?.planStatus?.availablePromptCredits ?? null,
-        flowCredits: userStatus?.planStatus?.availableFlowCredits ?? null,
-      },
-      conversations,
-      context: contextInfo,
-      quota,
-      history,
-    };
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        plan: {
+          name: planInfo.planName || 'Free',
+          monthlyPriceUsd: /ultra/i.test(planInfo.planName || '') ? 249.99 : /pro/i.test(planInfo.planName || '') ? 19.99 : 0,
+          promptCredits: userStatus?.planStatus?.availablePromptCredits ?? null,
+          flowCredits: userStatus?.planStatus?.availableFlowCredits ?? null,
+        },
+        conversations,
+        context: contextInfo,
+        quota,
+        history,
+      }),
+      {
+        contentType: 'application/json',
+        status: 200,
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
+      }
+    );
   } catch (err) {
     return new Response(
       JSON.stringify({ ok: false, error: err?.message || '读取本地服务失败' }),
