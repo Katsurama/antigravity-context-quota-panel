@@ -121,6 +121,7 @@
       flex-shrink: 0;
     }
     .icon-btn {
+      position: relative;
       width: 24px;
       height: 24px;
       display: inline-flex;
@@ -142,6 +143,63 @@
     .icon-btn.is-spinning svg { animation: spin 0.7s linear infinite; }
     .icon-btn svg { transform-origin: center; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .update-dot {
+      display: none;
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 1.5px var(--cq-card);
+    }
+    .icon-btn.has-update {
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    }
+    .icon-btn.has-update .update-dot { display: block; }
+    .update-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      background: var(--accent-soft);
+      border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      border-radius: 8px;
+      padding: 5px 8px;
+      margin-bottom: 8px;
+      font-size: 10.5px;
+      color: var(--cq-fg);
+    }
+    .update-bar-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .update-bar-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 650;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .update-bar-btn:disabled { opacity: 0.6; cursor: wait; }
+    .update-bar-close {
+      background: transparent;
+      border: none;
+      color: var(--cq-muted);
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      padding: 2px 3px;
+    }
+    .update-bar-close:hover { color: var(--cq-fg); }
 
     /* 唯一 2 标签导航 */
     .tabs {
@@ -222,26 +280,14 @@
     .pill-danger { background: var(--danger-soft); color: var(--danger); }
     .pill-accent { background: var(--accent-soft); color: var(--accent); }
 
-    .conv-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 7px;
-    }
-    .conv-select {
-      width: 100%;
-      background: var(--cq-subcard);
-      border: 1px solid var(--cq-border-soft);
-      color: var(--cq-fg-2);
-      border-radius: 6px;
-      padding: 4px 7px;
+    .conv-name {
       font-size: 10.5px;
-      font-family: inherit;
-      outline: none;
-      cursor: pointer;
-      min-width: 0;
+      color: var(--cq-muted);
+      margin-bottom: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .conv-select:focus { border-color: var(--accent); }
 
     .hero-row {
       display: flex;
@@ -795,6 +841,14 @@
       <span class="hdr-name">上下文与额度</span>
     </div>
     <div class="hdr-actions">
+      <button class="icon-btn" id="btn-update" title="检查插件更新" type="button">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2.5v7.5"></path>
+          <path d="M4.8 7.2L8 10.4l3.2-3.2"></path>
+          <path d="M3 13h10"></path>
+        </svg>
+        <span class="update-dot" aria-hidden="true"></span>
+      </button>
       <button class="icon-btn" id="btn-copy" title="复制当前状态摘要" type="button">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <rect x="5.5" y="5.5" width="8" height="8.5" rx="1.5"></rect>
@@ -810,6 +864,13 @@
     </div>
   </div>
 
+  <div id="update-bar" class="update-bar" style="display:none">
+    <span id="update-bar-msg">发现新版本</span>
+    <div class="update-bar-actions">
+      <button class="update-bar-btn" id="btn-apply-update" type="button">立即更新</button>
+      <button class="update-bar-close" id="btn-dismiss-update" type="button" aria-label="关闭">×</button>
+    </div>
+  </div>
   <div id="err-box" class="err" style="display:none"></div>
 
   <div class="tabs">
@@ -842,11 +903,7 @@
         <span class="pill pill-ok" id="ctx-status-pill">正常</span>
       </div>
 
-      <div class="conv-row">
-        <select class="conv-select" id="conv-select" aria-label="切换监控会话">
-          <option value="">当前会话</option>
-        </select>
-      </div>
+      <div class="conv-name" id="conv-title" style="display:none"></div>
 
       <div class="hero-row">
         <span class="hero-pct tabular" id="ctx-hero-pct">--%</span>
@@ -1096,12 +1153,13 @@
       otherArea.style.display = otherExpanded ? 'block' : 'none';
     };
 
-    let selectedConvId = '';
-    const convSelect = document.getElementById('conv-select');
-    convSelect.onchange = () => {
-      selectedConvId = convSelect.value;
-      refresh(false);
-    };
+    function getCurrentConversationId() {
+      return (
+        window.sidecar?.conversationId ||
+        new URLSearchParams(window.location.search).get('conversationId') ||
+        ''
+      );
+    }
 
     let monthOffset = 0;
     let selectedYmd = '';
@@ -1394,18 +1452,14 @@
       const pct = Number(Math.min(100, (c.usedTokens / budget) * 100).toFixed(1));
       const cCol = ctxColor(pct);
 
-      // 会话列表同步
-      const convs = data.conversations || [];
-      if (convs.length > 0) {
-        const curVal = selectedConvId || '';
-        convSelect.innerHTML = '';
-        convs.forEach((cv) => {
-          const opt = document.createElement('option');
-          opt.value = cv.isDefault ? '' : cv.id;
-          opt.textContent = `${cv.isDefault ? '当前 · ' : ''}${cv.title}`;
-          convSelect.appendChild(opt);
-        });
-        convSelect.value = curVal;
+      // 当前窗口会话标题（只读展示，自动跟随宿主窗口）
+      const convTitleEl = document.getElementById('conv-title');
+      if (c.title) {
+        convTitleEl.textContent = c.title;
+        convTitleEl.title = c.title;
+        convTitleEl.style.display = 'block';
+      } else {
+        convTitleEl.style.display = 'none';
       }
 
       // Section 1: 上下文
@@ -1608,7 +1662,7 @@
       btn.disabled = true;
       lbl.textContent = '正在触发压缩...';
       try {
-        const convId = selectedConvId || lastData?.context?.conversationId || '';
+        const convId = getCurrentConversationId() || lastData?.context?.conversationId || '';
         const res = await apiFetch('/api/compact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1651,7 +1705,8 @@
       }
       try {
         const qs = new URLSearchParams();
-        if (selectedConvId) qs.set('conversationId', selectedConvId);
+        const convId = getCurrentConversationId();
+        if (convId) qs.set('conversationId', convId);
         if (force) {
           qs.set('force', '1');
           qs.set('_t', String(startedAt));
@@ -1691,8 +1746,74 @@
       }
     });
 
+    let isCheckingUpdate = false;
+    let isApplyingUpdate = false;
+
+    async function checkUpdate(manual = false) {
+      if (isCheckingUpdate || isApplyingUpdate) return;
+      isCheckingUpdate = true;
+      const btn = document.getElementById('btn-update');
+      if (manual) btn.disabled = true;
+      try {
+        const res = await apiFetch('/api/update/check', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        if (data.hasUpdate) {
+          btn.classList.add('has-update');
+          btn.title = `发现新版本 v${data.latestVersion}（点击更新）`;
+          document.getElementById('update-bar-msg').textContent = `发现新版本 v${data.latestVersion}`;
+          document.getElementById('update-bar').style.display = 'flex';
+        } else {
+          btn.classList.remove('has-update');
+          btn.title = `已是最新版本 v${data.currentVersion}`;
+          if (manual) showToast(`已是最新版本 v${data.currentVersion}`);
+        }
+      } catch (err) {
+        if (manual) showToast(`检查更新失败: ${err?.message || '网络错误'}`);
+      } finally {
+        isCheckingUpdate = false;
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById('btn-update').onclick = () => checkUpdate(true);
+    document.getElementById('btn-dismiss-update').onclick = () => {
+      document.getElementById('update-bar').style.display = 'none';
+    };
+    document.getElementById('btn-apply-update').onclick = async () => {
+      if (isApplyingUpdate) return;
+      isApplyingUpdate = true;
+      const btn = document.getElementById('btn-apply-update');
+      btn.disabled = true;
+      btn.textContent = '更新中...';
+      try {
+        const res = await apiFetch('/api/update/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        showToast(`已更新到 v${data.updatedTo}，正在重载...`);
+        setTimeout(() => window.location.reload(), 2000);
+      } catch (err) {
+        isApplyingUpdate = false;
+        btn.disabled = false;
+        btn.textContent = '立即更新';
+        showToast(`更新失败: ${err?.message || '未知错误'}`);
+      }
+    };
+
     resetPollTimer();
     refresh(false);
+    if (!sessionStorage.getItem('cq_update_checked')) {
+      sessionStorage.setItem('cq_update_checked', '1');
+      setTimeout(() => checkUpdate(false), 3000);
+    }
   </script>
 </body>
 </html>

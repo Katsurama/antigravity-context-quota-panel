@@ -3,15 +3,25 @@
  * 1. 通过 RetrieveUserQuotaSummary 获取真实的 5 小时滚动额度与周额度，并自动匹配当前窗口所用模型组；
  * 2. 按模型自动识别上下文上限（Gemini 4: 512K / Flash: 256K / Claude: 200K / GPT-OSS: 128K），提取精确上下文占用、近期增长曲线、缓存命中率与生成速度；
  * 3. 聚合本机历史 Token 消耗（Total / Today / Month / Year）、按日热力图及 Top 5 模型排行；
- * 4. 提供一键系统剪贴板复制 (/api/copy) 与一键自动压缩上下文 (/api/compact -> /compact)。
+ * 4. 提供一键系统剪贴板复制 (/api/copy)、一键自动压缩上下文 (/api/compact -> /compact) 及插件内检查/应用更新。
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SidecarApp, Response } from 'sidecar_sdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_ROOT = join(__dirname, '..', '..');
+const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/Katsurama/antigravity-context-quota-panel/main';
+const GITHUB_REPO_URL = 'https://github.com/Katsurama/antigravity-context-quota-panel';
+const UPDATE_FILES = [
+  'plugin.json',
+  'assets/logo.svg',
+  'sidecars/quota_meter/sidecar.json',
+  'sidecars/quota_meter/main.mjs',
+  'sidecars/quota_meter/index.html',
+];
 const LS_ADDRESS = process.env.ANTIGRAVITY_LS_ADDRESS || '127.0.0.1:5387';
 const CSRF_TOKEN = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
 
@@ -69,23 +79,6 @@ function resolveModelContextLimit(canonicalId = '', modelLabel = '') {
   if (/3\.8.*flash|\bflash\b/.test(text)) return 256000;
   if (/gemini-4|gemini 4|orchestrator/.test(text)) return 512000;
   return DEFAULT_CONTEXT_LIMIT;
-}
-
-/**
- * 构建最近会话列表（最多 10 条），供侧边栏切换查看
- */
-function buildConversationsList(summaries = {}, defaultId = '') {
-  return Object.entries(summaries)
-    .map(([id, s]) => ({
-      id,
-      title: String(s?.summary || id.slice(0, 8)).trim() || id.slice(0, 8),
-      lastModifiedTime: s?.lastModifiedTime || '',
-      ts: Date.parse(s?.lastModifiedTime || '') || 0,
-      isDefault: id === defaultId,
-    }))
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, 10)
-    .map(({ ts, ...rest }) => rest);
 }
 
 /**
@@ -440,12 +433,8 @@ app.api('/api/telemetry', async (data) => {
     const modelConfigs = userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
     const summaries = allTrajRes?.trajectorySummaries || {};
 
-    let targetId = '';
-    if (requestedConv && summaries[requestedConv]) {
-      targetId = requestedConv;
-    } else if (defaultConv && summaries[defaultConv]) {
-      targetId = defaultConv;
-    } else {
+    let targetId = requestedConv || defaultConv;
+    if (!targetId) {
       let latestMs = -1;
       for (const [id, s] of Object.entries(summaries)) {
         const ms = Date.parse(s?.lastModifiedTime || '') || 0;
@@ -458,7 +447,11 @@ app.api('/api/telemetry', async (data) => {
 
     let currentTraj = null;
     if (targetId) {
-      currentTraj = await callLs('GetCascadeTrajectory', { cascadeId: targetId });
+      try {
+        currentTraj = await callLs('GetCascadeTrajectory', { cascadeId: targetId });
+      } catch {
+        currentTraj = null;
+      }
     }
 
     const contextInfo = extractContextAndSpeed(currentTraj, modelConfigs);
@@ -467,7 +460,6 @@ app.api('/api/telemetry', async (data) => {
 
     const quota = buildQuotaSummary(quotaSummaryRes, contextInfo.modelLabel, contextInfo.modelId);
     const history = await aggregateHistory(summaries, targetId, currentTraj, modelConfigs, forceHistory);
-    const conversations = buildConversationsList(summaries, defaultConv || targetId);
 
     return new Response(
       JSON.stringify({
@@ -479,7 +471,6 @@ app.api('/api/telemetry', async (data) => {
           promptCredits: userStatus?.planStatus?.availablePromptCredits ?? null,
           flowCredits: userStatus?.planStatus?.availableFlowCredits ?? null,
         },
-        conversations,
         context: contextInfo,
         quota,
         history,
@@ -609,6 +600,102 @@ app.api('/api/compact', async (raw) => {
   } catch (err) {
     return new Response(
       JSON.stringify({ ok: false, error: err?.message || '触发压缩失败' }),
+      { contentType: 'application/json', status: 500 }
+    );
+  }
+}, 'POST');
+
+function readLocalVersion() {
+  try {
+    const raw = readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8');
+    const parsed = JSON.parse(raw);
+    return String(parsed?.version || '0.0.0').trim();
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function compareSemver(a = '0.0.0', b = '0.0.0') {
+  const pa = String(a).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < len; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function fetchRawFile(relPath) {
+  const url = `${GITHUB_RAW_BASE}/${relPath}?_t=${Date.now()}`;
+  const res = await fetch(url, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`拉取 ${relPath} 失败: HTTP ${res.status}`);
+  const text = await res.text();
+  if (!text) throw new Error(`拉取 ${relPath} 返回空内容`);
+  return text;
+}
+
+app.api('/api/update/check', async () => {
+  try {
+    const currentVersion = readLocalVersion();
+    const remoteText = await fetchRawFile('plugin.json');
+    const remotePkg = JSON.parse(remoteText);
+    const latestVersion = String(remotePkg?.version || '').trim();
+    if (!latestVersion) throw new Error('远端 plugin.json 缺少 version 字段');
+    const hasUpdate = compareSemver(latestVersion, currentVersion) > 0;
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        currentVersion,
+        latestVersion,
+        hasUpdate,
+        repoUrl: GITHUB_REPO_URL,
+      }),
+      {
+        contentType: 'application/json',
+        status: 200,
+        headers: { 'Cache-Control': 'no-store' },
+      }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ ok: false, error: err?.message || '检查更新失败' }),
+      { contentType: 'application/json', status: 500 }
+    );
+  }
+}, 'GET');
+
+app.api('/api/update/apply', async () => {
+  try {
+    const entries = await Promise.all(
+      UPDATE_FILES.map(async (relPath) => [relPath, await fetchRawFile(relPath)])
+    );
+    const pkgEntry = entries.find(([p]) => p === 'plugin.json');
+    const remotePkg = JSON.parse(pkgEntry[1]);
+    if (remotePkg?.name !== 'context-quota-panel' || !remotePkg?.version) {
+      throw new Error('远端 plugin.json 校验失败');
+    }
+
+    for (const [relPath, content] of entries) {
+      const dest = join(PLUGIN_ROOT, relPath);
+      const tmp = `${dest}.tmp-${Date.now()}`;
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(tmp, content, 'utf-8');
+      renameSync(tmp, dest);
+    }
+
+    setTimeout(() => process.exit(0), 600);
+    return {
+      ok: true,
+      updatedTo: String(remotePkg.version).trim(),
+      restarting: true,
+    };
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ ok: false, error: err?.message || '更新失败' }),
       { contentType: 'application/json', status: 500 }
     );
   }
