@@ -396,19 +396,37 @@
       margin-top: 7px;
       padding: 5px 8px;
       border-radius: 6px;
-      border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-      background: var(--warn-soft);
-      color: var(--warn);
+      border: 1px solid var(--cq-border);
+      background: var(--cq-subcard);
+      color: var(--cq-fg-2);
       font-size: 10.5px;
       font-weight: 650;
       font-family: inherit;
       cursor: pointer;
-      display: none;
+      display: flex;
       align-items: center;
       justify-content: center;
       gap: 5px;
+      transition: border-color 0.15s, color 0.15s, background 0.15s, opacity 0.15s;
     }
-    .compact-btn:hover { opacity: 0.9; }
+    .compact-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--cq-fg);
+    }
+    .compact-btn.is-warn {
+      border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+      background: var(--warn-soft);
+      color: var(--warn);
+    }
+    .compact-btn.is-warn:hover:not(:disabled) {
+      border-color: var(--warn);
+      color: var(--warn);
+      opacity: 0.92;
+    }
+    .compact-btn:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
 
     /* Hero 风格当前模型额度卡片（与上下文卡片完全对称直观） */
     .active-group-card {
@@ -887,7 +905,14 @@
         <span id="meta-model"><strong>--</strong></span>
         <span id="meta-speed-cache">-- tok/s · 缓存 --%</span>
       </div>
-      <button class="compact-btn" id="btn-copy-compact" type="button">复制 /compact 释放上下文</button>
+      <button class="compact-btn" id="btn-compact" type="button" disabled>
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 3l4 3.5L12 3"></path>
+          <path d="M4 13l4-3.5L12 13"></path>
+          <path d="M3 8h10"></path>
+        </svg>
+        <span id="btn-compact-lbl">一键压缩上下文 (/compact)</span>
+      </button>
     </div>
 
     <div id="active-quota-area"></div>
@@ -1103,6 +1128,14 @@
     let monthOffset = 0;
     let selectedYmd = '';
     let lastData = null;
+    let isCompacting = false;
+
+    function apiFetch(url, options = {}) {
+      if (window.sidecar?.fetch) {
+        return window.sidecar.fetch(url, options);
+      }
+      return fetch(url, options);
+    }
 
     // 每模型上下文上限自定义覆盖
     function loadModelLimits() {
@@ -1424,7 +1457,13 @@
       const tpsText = c.speed?.tps > 0 ? `${c.speed.tps} tok/s` : '-- tok/s';
       document.getElementById('meta-speed-cache').textContent = `${tpsText} · 缓存 ${c.cacheHitRate}%`;
 
-      document.getElementById('btn-copy-compact').style.display = pct >= 75 ? 'flex' : 'none';
+      const btnCompact = document.getElementById('btn-compact');
+      const btnCompactLbl = document.getElementById('btn-compact-lbl');
+      btnCompact.classList.toggle('is-warn', pct >= 75);
+      if (!isCompacting) {
+        btnCompact.disabled = !c.hasData;
+        btnCompactLbl.textContent = pct >= 75 ? '上下文较高 · 一键压缩 (/compact)' : '一键压缩上下文 (/compact)';
+      }
 
       // Section 2: Hero 风格额度卡片
       const activeArea = document.getElementById('active-quota-area');
@@ -1541,13 +1580,55 @@
       showToast(`刷新频率已切为：${REFRESH_CADENCES[cadenceIdx].label}`);
     };
 
-    async function copyText(text, okMsg) {
+    function fallbackExecCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      let ok = false;
       try {
-        await navigator.clipboard.writeText(text);
-        showToast(okMsg);
-      } catch {
-        showToast('复制失败，请手动操作');
+        ok = document.execCommand('copy');
+      } finally {
+        ta.remove();
       }
+      if (!ok) throw new Error('execCommand copy failed');
+    }
+
+    async function copyText(text, okMsg, silentFail = false) {
+      try {
+        const res = await apiFetch('/api/copy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.ok) {
+            if (okMsg) showToast(okMsg);
+            return true;
+          }
+        }
+      } catch {}
+
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          if (okMsg) showToast(okMsg);
+          return true;
+        }
+      } catch {}
+
+      try {
+        fallbackExecCopy(text);
+        if (okMsg) showToast(okMsg);
+        return true;
+      } catch {}
+
+      if (!silentFail) showToast('复制失败，请手动操作');
+      return false;
     }
 
     document.getElementById('btn-copy').onclick = () => {
@@ -1563,8 +1644,43 @@
       copyText(msg, '已复制当前状态摘要');
     };
 
-    document.getElementById('btn-copy-compact').onclick = () => {
-      copyText('/compact', '已复制 /compact');
+    document.getElementById('btn-compact').onclick = async () => {
+      if (isCompacting) return;
+      const btn = document.getElementById('btn-compact');
+      const lbl = document.getElementById('btn-compact-lbl');
+      isCompacting = true;
+      btn.disabled = true;
+      lbl.textContent = '正在触发压缩...';
+      try {
+        const convId = selectedConvId || lastData?.context?.conversationId || '';
+        const res = await apiFetch('/api/compact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId: convId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        showToast('已触发 /compact 自动压缩，稍后刷新');
+        setTimeout(() => refresh(false), 2500);
+        setTimeout(() => refresh(false), 6000);
+      } catch (err) {
+        const copied = await copyText('/compact', '', true);
+        showToast(
+          copied
+            ? `自动压缩失败，已复制 /compact 供手动粘贴`
+            : `自动压缩失败: ${err?.message || '未知错误'}`
+        );
+      } finally {
+        isCompacting = false;
+        if (lastData) {
+          render(lastData);
+        } else {
+          btn.disabled = false;
+          lbl.textContent = '一键压缩上下文 (/compact)';
+        }
+      }
     };
 
     async function refresh(force = false) {

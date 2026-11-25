@@ -1,9 +1,11 @@
 /**
- * 上下文与额度 Sidecar 后端 v2.2
+ * 上下文与额度 Sidecar 后端 v2.3
  * 1. 通过 RetrieveUserQuotaSummary 获取真实的 5 小时滚动额度与周额度，并自动匹配当前窗口所用模型组；
  * 2. 按模型自动识别上下文上限（Gemini 4: 512K / Flash: 256K / Claude: 200K / GPT-OSS: 128K），提取精确上下文占用、近期增长曲线、缓存命中率与生成速度；
- * 3. 聚合本机历史 Token 消耗（Total / Today / Month / Year）、按日热力图及 Top 5 模型排行。
+ * 3. 聚合本机历史 Token 消耗（Total / Today / Month / Year）、按日热力图及 Top 5 模型排行；
+ * 4. 提供一键系统剪贴板复制 (/api/copy) 与一键自动压缩上下文 (/api/compact -> /compact)。
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -488,5 +490,121 @@ app.api('/api/telemetry', async (data) => {
     );
   }
 }, 'GET');
+
+function writeClipboardNative(text) {
+  if (process.platform === 'darwin') {
+    const r = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(r.stderr || `pbcopy exit ${r.status}`);
+    return;
+  }
+  if (process.platform === 'linux') {
+    const candidates = [
+      ['wl-copy', []],
+      ['xclip', ['-selection', 'clipboard']],
+    ];
+    let lastErr = null;
+    for (const [cmd, args] of candidates) {
+      const r = spawnSync(cmd, args, { input: text, encoding: 'utf8' });
+      if (!r.error && r.status === 0) return;
+      lastErr = r.error || new Error(r.stderr || `${cmd} exit ${r.status}`);
+    }
+    throw lastErr || new Error('未找到可用的系统剪贴板工具');
+  }
+  throw new Error(`当前平台暂不支持原生剪贴板写入: ${process.platform}`);
+}
+
+app.api('/api/copy', async (raw) => {
+  try {
+    const body = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    const text = body?.text;
+    if (typeof text !== 'string' || !text) {
+      return new Response(
+        JSON.stringify({ ok: false, error: '空文本' }),
+        { contentType: 'application/json', status: 400 }
+      );
+    }
+    writeClipboardNative(text);
+    return { ok: true };
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ ok: false, error: err?.message || '写入剪贴板失败' }),
+      { contentType: 'application/json', status: 500 }
+    );
+  }
+}, 'POST');
+
+app.api('/api/compact', async (raw) => {
+  try {
+    const body = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    const requestedConv = typeof body?.conversationId === 'string' ? body.conversationId.trim() : '';
+    const defaultConv = app.config.conversationId || '';
+    let targetId = requestedConv || defaultConv;
+
+    if (!targetId) {
+      const allTrajRes = await callLs('GetAllCascadeTrajectories', {});
+      const summaries = allTrajRes?.trajectorySummaries || {};
+      let latestMs = -1;
+      for (const [id, s] of Object.entries(summaries)) {
+        const ms = Date.parse(s?.lastModifiedTime || '') || 0;
+        if (ms > latestMs) {
+          latestMs = ms;
+          targetId = id;
+        }
+      }
+    }
+
+    if (!targetId) {
+      return new Response(
+        JSON.stringify({ ok: false, error: '未找到可压缩的活动会话' }),
+        { contentType: 'application/json', status: 400 }
+      );
+    }
+
+    const traj = await callLs('GetCascadeTrajectory', { cascadeId: targetId });
+    const steps = traj?.trajectory?.steps || [];
+    let lastUserConfig = null;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const s = steps[i];
+      if (s?.type === 'CORTEX_STEP_TYPE_USER_INPUT' && s?.userInput?.userConfig) {
+        lastUserConfig = s.userInput.userConfig;
+        break;
+      }
+    }
+
+    if (!lastUserConfig) {
+      return new Response(
+        JSON.stringify({ ok: false, error: '当前会话暂无可压缩的历史对话' }),
+        { contentType: 'application/json', status: 400 }
+      );
+    }
+
+    const payload = {
+      cascadeId: targetId,
+      items: [
+        {
+          item: {
+            slashCommand: {
+              info: {
+                name: 'compact',
+                type: 'SLASH_COMMAND_TYPE_SYSTEM',
+                icon: 'collapse_all',
+              },
+            },
+          },
+        },
+      ],
+      cascadeConfig: lastUserConfig,
+    };
+
+    await callLs('SendUserCascadeMessage', payload);
+    return { ok: true, conversationId: targetId };
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ ok: false, error: err?.message || '触发压缩失败' }),
+      { contentType: 'application/json', status: 500 }
+    );
+  }
+}, 'POST');
 
 app.run();
