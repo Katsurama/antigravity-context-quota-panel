@@ -6,6 +6,27 @@
 
 ---
 
+## 🖼️ 界面预览
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="assets/preview-live.jpg" width="320" alt="实时监控界面预览" />
+        <br />
+        <sub><b>实时监控</b>：自动跟随窗口上下文 · 一键 <code>/compact</code> · 5 小时 / 周额度看板</sub>
+      </td>
+      <td align="center">
+        <img src="assets/preview-history.jpg" width="320" alt="历史用量界面预览" />
+        <br />
+        <sub><b>历史用量</b>：Token 累计统计 · 订阅回本倍数 · 月历热力图 & Top 5 模型排行</sub>
+      </td>
+    </tr>
+  </table>
+</div>
+
+---
+
 ## ✨ 功能特性
 
 - **原生零侵入**：遵循 Antigravity 官方 `~/.gemini/config/plugins/` 插件与 Sidecar 规范开发，**不改写 `app.asar`、不依赖调试端口、`ElectronAsarIntegrity` 完全安全**。
@@ -39,11 +60,11 @@ chmod +x install.sh update.sh uninstall.sh
 
 > 开发者调试模式可使用 `./install.sh --link` 创建软链接，修改仓库代码后无需重复拷贝。
 
-### 方式二：手动导入安装
+### 方式二：下载 Release 安装包手动导入
 
-1. 点击右上角 **Download ZIP** 下载并解压本仓库。
+1. 前往 [GitHub Releases 最新版本](https://github.com/Katsurama/antigravity-context-quota-panel/releases/latest) 下载 `antigravity-context-quota-panel-v*.zip`（或点击右上角 **Download ZIP**）并解压。
 2. 在本机创建插件目录 `~/.gemini/config/plugins/context-quota-panel/`。
-3. 将仓库内的以下文件完整放入该目录中（保持目录结构不变）：
+3. 将解压得到的以下插件核心文件放入该目录中（保持目录结构不变）：
    ```text
    ~/.gemini/config/plugins/context-quota-panel/
    ├── plugin.json
@@ -71,9 +92,9 @@ chmod +x install.sh update.sh uninstall.sh
 3. **「历史用量」页**：
    - 点击右上角 `本月 xx 回本` 胶囊可在行内填写或修改实际订阅月费（支持 USD / CNY）。
    - 点击月历方块查看当日明细，点击图例左侧圆点切换热力图色系。
-4. **刷新与快捷操作**：
-   - 右上角按钮支持 **复制当前状态摘要** 与 **立即刷新**（面板聚焦时按 **`R`** 键可快捷刷新）。
-   - 默认每 **30 秒** 自动刷新一次（面板隐藏时自动暂停，节省内存与后台开销）。
+4. **右上角工具栏与自动刷新**：
+   - 从左到右依次为：**检查更新（`↓`）**、**复制当前状态摘要**、**立即刷新（`↻`，面板聚焦时按 `R` 键可快捷刷新）**。
+   - 默认每 **30 秒** 自动刷新一次，侧边栏隐藏时自动暂停，节省内存与后台开销。
 
 ---
 
